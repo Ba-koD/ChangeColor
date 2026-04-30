@@ -1,0 +1,10 @@
+services:
+  change-color:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATA_PATH: /app/data/state.json
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
