@@ -5,7 +5,7 @@ use poise::serenity_prelude as serenity;
 use crate::roles::{role_position_updates, used_color_roles};
 use crate::storage::{GuildConfig, LossPolicy, Store, UserColorState};
 use crate::util::{
-    color_role_name, is_color_role_name, is_eligible, legacy_color_role_name, normalize_hex,
+    ColorSpec, is_color_role_name, is_eligible, legacy_color_role_name, normalize_hex,
 };
 
 #[test]
@@ -30,15 +30,24 @@ fn rejects_invalid_hex() {
 
 #[test]
 fn color_role_names_are_hex_only() {
-    assert_eq!(color_role_name("#ff00ff"), "#ff00ff");
+    assert_eq!(ColorSpec::solid("#ff00ff").unwrap().role_name(), "#ff00ff");
     assert_eq!(legacy_color_role_name("#ff00ff"), "color #ff00ff");
 }
 
 #[test]
 fn recognizes_current_and_legacy_color_role_names() {
     assert!(is_color_role_name("#ff00ff"));
+    assert!(is_color_role_name("#ff00ff-#00ffaa"));
     assert!(is_color_role_name("color #ff00ff"));
     assert!(!is_color_role_name("관리자"));
+}
+
+#[test]
+fn gradient_color_spec_uses_two_hex_codes_as_key() {
+    let spec = ColorSpec::gradient("#Ff00AA", "0fa").unwrap();
+
+    assert_eq!(spec.key(), "#ff00aa-#00ffaa");
+    assert_eq!(spec.display(), "#ff00aa-#00ffaa");
 }
 
 #[test]

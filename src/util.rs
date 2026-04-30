@@ -6,6 +6,94 @@ use poise::serenity_prelude as serenity;
 use crate::storage::{GuildConfig, LossPolicy};
 use crate::{Error, user_error};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ColorSpec {
+    Solid(ColorValue),
+    Gradient { start: ColorValue, end: ColorValue },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ColorValue {
+    pub(crate) hex: String,
+    pub(crate) red: u8,
+    pub(crate) green: u8,
+    pub(crate) blue: u8,
+}
+
+impl ColorSpec {
+    pub(crate) fn solid(input: &str) -> Result<Self, Error> {
+        Ok(Self::Solid(ColorValue::parse(input)?))
+    }
+
+    pub(crate) fn gradient(start: &str, end: &str) -> Result<Self, Error> {
+        Ok(Self::Gradient {
+            start: ColorValue::parse(start)?,
+            end: ColorValue::parse(end)?,
+        })
+    }
+
+    pub(crate) fn parse_key(input: &str) -> Result<Self, Error> {
+        if let Some((start, end)) = input.split_once('-') {
+            Self::gradient(start, end)
+        } else {
+            Self::solid(input)
+        }
+    }
+
+    pub(crate) fn key(&self) -> String {
+        match self {
+            Self::Solid(color) => color.hex.clone(),
+            Self::Gradient { start, end } => format!("{}-{}", start.hex, end.hex),
+        }
+    }
+
+    pub(crate) fn role_name(&self) -> String {
+        self.key()
+    }
+
+    pub(crate) fn display(&self) -> String {
+        self.key()
+    }
+
+    pub(crate) fn primary(&self) -> &ColorValue {
+        match self {
+            Self::Solid(color) => color,
+            Self::Gradient { start, .. } => start,
+        }
+    }
+
+    pub(crate) fn secondary(&self) -> Option<&ColorValue> {
+        match self {
+            Self::Solid(_) => None,
+            Self::Gradient { end, .. } => Some(end),
+        }
+    }
+
+    pub(crate) fn is_gradient(&self) -> bool {
+        matches!(self, Self::Gradient { .. })
+    }
+}
+
+impl ColorValue {
+    fn parse(input: &str) -> Result<Self, Error> {
+        let (hex, red, green, blue) = normalize_hex(input)?;
+        Ok(Self {
+            hex,
+            red,
+            green,
+            blue,
+        })
+    }
+
+    pub(crate) fn as_role_colour(&self) -> serenity::Colour {
+        serenity::Colour::from_rgb(self.red, self.green, self.blue)
+    }
+
+    pub(crate) fn as_discord_int(&self) -> u32 {
+        u32::from(self.red) << 16 | u32::from(self.green) << 8 | u32::from(self.blue)
+    }
+}
+
 pub(crate) fn highest_role<'a>(
     roles: &'a HashMap<serenity::RoleId, serenity::Role>,
     member_roles: &[serenity::RoleId],
@@ -32,16 +120,12 @@ pub(crate) fn is_managed_color_role(config: &GuildConfig, role_id: serenity::Rol
             .any(|configured_id| *configured_id == role_id.get())
 }
 
-pub(crate) fn color_role_name(hex: &str) -> String {
-    hex.to_string()
-}
-
 pub(crate) fn legacy_color_role_name(hex: &str) -> String {
     format!("color {hex}")
 }
 
 pub(crate) fn is_color_role_name(name: &str) -> bool {
-    normalize_hex(name).is_ok()
+    ColorSpec::parse_key(name).is_ok()
         || name
             .strip_prefix("color ")
             .is_some_and(|hex| normalize_hex(hex).is_ok())

@@ -6,8 +6,8 @@ use crate::config::{END_MARKER_NAME, ROLE_LIMIT, START_MARKER_NAME};
 use crate::discord::current_bot_member;
 use crate::storage::{GuildConfig, LossPolicy, Storage};
 use crate::util::{
-    color_role_name, highest_role, is_color_role_name, is_eligible, legacy_color_role_name,
-    mention_role, normalize_hex, now_unix,
+    ColorSpec, highest_role, is_color_role_name, is_eligible, legacy_color_role_name, mention_role,
+    now_unix,
 };
 use crate::{Error, user_error};
 
@@ -16,10 +16,9 @@ pub(crate) async fn apply_color_for_user(
     storage: &Storage,
     guild_id: serenity::GuildId,
     user_id: serenity::UserId,
-    raw_hex: &str,
+    spec: ColorSpec,
     check_eligibility: bool,
 ) -> Result<String, Error> {
-    let (hex, red, green, blue) = normalize_hex(raw_hex)?;
     let member = guild_id.member(ctx, user_id).await?;
     let config = storage.guild_config(guild_id).await;
 
@@ -32,7 +31,7 @@ pub(crate) async fn apply_color_for_user(
         return Err(user_error("컬러 명령어를 사용할 수 있는 역할이 없습니다."));
     }
 
-    let role_id = ensure_color_role(ctx, storage, guild_id, &hex, red, green, blue).await?;
+    let role_id = ensure_color_role(ctx, storage, guild_id, &spec).await?;
     let removed_role_ids =
         remove_configured_color_roles(ctx, &config, &member, Some(role_id)).await?;
     if !member.roles.contains(&role_id) {
@@ -42,7 +41,7 @@ pub(crate) async fn apply_color_for_user(
     storage
         .update_guild(guild_id, |guild| {
             let state = guild.users.entry(user_id.get()).or_default();
-            state.last_hex = Some(hex.clone());
+            state.last_hex = Some(spec.key());
             state.current_role_id = Some(role_id.get());
             state.lost_eligibility_at = None;
         })
@@ -50,7 +49,7 @@ pub(crate) async fn apply_color_for_user(
 
     cleanup_unused_color_roles(ctx, storage, guild_id, removed_role_ids).await;
 
-    Ok(hex)
+    Ok(spec.display())
 }
 
 pub(crate) async fn remove_user_color(
@@ -89,56 +88,47 @@ pub(crate) async fn restore_user_color(
     check_eligibility: bool,
 ) -> Result<String, Error> {
     let config = storage.guild_config(guild_id).await;
-    let Some(last_hex) = config
+    let Some(last_color_key) = config
         .users
         .get(&user_id.get())
         .and_then(|state| state.last_hex.clone())
     else {
         return Err(user_error("저장된 마지막 컬러가 없습니다."));
     };
+    let spec = ColorSpec::parse_key(&last_color_key)?;
 
-    apply_color_for_user(
-        ctx,
-        storage,
-        guild_id,
-        user_id,
-        &last_hex,
-        check_eligibility,
-    )
-    .await
+    apply_color_for_user(ctx, storage, guild_id, user_id, spec, check_eligibility).await
 }
 
 async fn ensure_color_role(
     ctx: &serenity::Context,
     storage: &Storage,
     guild_id: serenity::GuildId,
-    hex: &str,
-    red: u8,
-    green: u8,
-    blue: u8,
+    spec: &ColorSpec,
 ) -> Result<serenity::RoleId, Error> {
     ensure_markers(ctx, storage, guild_id).await?;
 
     let roles = guild_id.roles(&ctx.http).await?;
     let config = storage.guild_config(guild_id).await;
-    if let Some(role_id) = config.color_roles.get(hex).copied() {
+    let key = spec.key();
+    if let Some(role_id) = config.color_roles.get(&key).copied() {
         let role_id = serenity::RoleId::new(role_id);
         if let Some(role) = roles.get(&role_id) {
-            sync_color_role(ctx, guild_id, role, hex, red, green, blue).await?;
+            sync_color_role(guild_id, role, spec).await?;
             return Ok(role_id);
         }
     }
 
-    let role_name = color_role_name(hex);
+    let role_name = spec.role_name();
     if let Some(role) = roles
         .values()
-        .find(|role| role.name == role_name || role.name == legacy_color_role_name(hex))
+        .find(|role| role_matches_color_name(role, spec, &role_name))
     {
         let role_id = role.id;
-        sync_color_role(ctx, guild_id, role, hex, red, green, blue).await?;
+        sync_color_role(guild_id, role, spec).await?;
         storage
             .update_guild(guild_id, |guild| {
-                guild.color_roles.insert(hex.to_string(), role_id.get());
+                guild.color_roles.insert(key.clone(), role_id.get());
             })
             .await?;
         return Ok(role_id);
@@ -154,17 +144,7 @@ async fn ensure_color_role(
     let bot_highest_position = highest_role(&roles, &bot_member.roles)
         .ok_or_else(|| user_error("봇 최고 역할을 확인할 수 없습니다."))?;
 
-    let role = guild_id
-        .create_role(
-            &ctx.http,
-            serenity::EditRole::new()
-                .name(role_name)
-                .permissions(serenity::Permissions::empty())
-                .colour(serenity::Colour::from_rgb(red, green, blue))
-                .hoist(false)
-                .mentionable(false),
-        )
-        .await?;
+    let role = create_color_role_raw(guild_id, &role_name, spec).await?;
     if role.position >= bot_highest_position.position {
         return Err(user_error(
             "새 컬러 역할이 봇 최고 역할보다 낮게 생성되지 않았습니다. 봇 역할 위치를 올려주세요.",
@@ -173,7 +153,7 @@ async fn ensure_color_role(
 
     storage
         .update_guild(guild_id, |guild| {
-            guild.color_roles.insert(hex.to_string(), role.id.get());
+            guild.color_roles.insert(key, role.id.get());
         })
         .await?;
 
@@ -186,32 +166,145 @@ async fn ensure_color_role(
 }
 
 async fn sync_color_role(
-    ctx: &serenity::Context,
     guild_id: serenity::GuildId,
     role: &serenity::Role,
-    hex: &str,
-    red: u8,
-    green: u8,
-    blue: u8,
+    spec: &ColorSpec,
 ) -> Result<(), Error> {
-    let expected_name = color_role_name(hex);
-    let expected_colour = serenity::Colour::from_rgb(red, green, blue);
-    if role.name != expected_name || role.colour != expected_colour {
-        guild_id
-            .edit_role(
-                &ctx.http,
-                role.id,
-                serenity::EditRole::new()
-                    .name(expected_name)
-                    .colour(expected_colour)
-                    .permissions(serenity::Permissions::empty())
-                    .hoist(false)
-                    .mentionable(false),
-            )
-            .await?;
+    let expected_name = spec.role_name();
+    if role.name != expected_name || !role_has_color_spec(role, spec) {
+        edit_color_role_raw(guild_id, role.id, &expected_name, spec).await?;
     }
 
     Ok(())
+}
+
+fn role_matches_color_name(role: &serenity::Role, spec: &ColorSpec, role_name: &str) -> bool {
+    if role.name == role_name {
+        return true;
+    }
+
+    if spec.is_gradient() {
+        return false;
+    }
+
+    role.name == legacy_color_role_name(&spec.primary().hex)
+}
+
+fn role_has_color_spec(role: &serenity::Role, spec: &ColorSpec) -> bool {
+    role.colours.primary_colour == spec.primary().as_role_colour()
+        && role.colours.secondary_colour == spec.secondary().map(|color| color.as_role_colour())
+        && role.colours.tertiary_colour.is_none()
+}
+
+async fn create_color_role_raw(
+    guild_id: serenity::GuildId,
+    role_name: &str,
+    spec: &ColorSpec,
+) -> Result<serenity::Role, Error> {
+    let token = std::env::var("DISCORD_TOKEN")
+        .map_err(|_| user_error("DISCORD_TOKEN env var is required"))?;
+    let url = format!(
+        "https://discord.com/api/v10/guilds/{}/roles",
+        guild_id.get()
+    );
+    let body = color_role_body(role_name, spec);
+    let request = reqwest::Client::new()
+        .post(url)
+        .header("Authorization", format!("Bot {token}"))
+        .json(&body);
+
+    send_role_request(request, "컬러 역할 생성").await
+}
+
+async fn edit_color_role_raw(
+    guild_id: serenity::GuildId,
+    role_id: serenity::RoleId,
+    role_name: &str,
+    spec: &ColorSpec,
+) -> Result<serenity::Role, Error> {
+    let token = std::env::var("DISCORD_TOKEN")
+        .map_err(|_| user_error("DISCORD_TOKEN env var is required"))?;
+    let url = format!(
+        "https://discord.com/api/v10/guilds/{}/roles/{}",
+        guild_id.get(),
+        role_id.get()
+    );
+    let body = color_role_body(role_name, spec);
+    let request = reqwest::Client::new()
+        .patch(url)
+        .header("Authorization", format!("Bot {token}"))
+        .json(&body);
+
+    send_role_request(request, "컬러 역할 수정").await
+}
+
+fn color_role_body(role_name: &str, spec: &ColorSpec) -> serde_json::Value {
+    serde_json::json!({
+        "name": role_name,
+        "permissions": "0",
+        "colors": {
+            "primary_color": spec.primary().as_discord_int(),
+            "secondary_color": spec.secondary().map(|color| color.as_discord_int()),
+            "tertiary_color": null,
+        },
+        "hoist": false,
+        "mentionable": false,
+    })
+}
+
+async fn send_role_request(
+    request: reqwest::RequestBuilder,
+    action: &str,
+) -> Result<serenity::Role, Error> {
+    let response = request.send().await?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_else(|_| "".to_string());
+
+    if !status.is_success() {
+        return Err(user_error(format!(
+            "{action} 실패: HTTP {status} {}",
+            discord_error_summary(&text)
+        )));
+    }
+
+    serde_json::from_str(&text).map_err(|error| {
+        user_error(format!(
+            "{action} 응답 파싱 실패: {error}; body: {}",
+            compact_body(&text)
+        ))
+    })
+}
+
+fn discord_error_summary(text: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return format!("body: {}", compact_body(text));
+    };
+
+    let code = value
+        .get("code")
+        .and_then(|code| code.as_i64())
+        .map(|code| format!("Discord code {code}"))
+        .unwrap_or_else(|| "Discord code 없음".to_string());
+    let message = value
+        .get("message")
+        .and_then(|message| message.as_str())
+        .unwrap_or("메시지 없음");
+
+    format!("{code}: {message}; body: {}", compact_body(text))
+}
+
+fn compact_body(text: &str) -> String {
+    const MAX_ERROR_BODY_CHARS: usize = 700;
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_ERROR_BODY_CHARS {
+        compact
+    } else {
+        let truncated = compact
+            .chars()
+            .take(MAX_ERROR_BODY_CHARS)
+            .collect::<String>();
+        format!("{truncated}...")
+    }
 }
 
 pub(crate) async fn ensure_markers(

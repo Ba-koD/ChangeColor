@@ -7,7 +7,7 @@ use crate::roles::{
     restore_user_color, validate_anchor_role,
 };
 use crate::storage::LossPolicy;
-use crate::util::{format_policy, highest_role, is_managed_color_role, mention_role};
+use crate::util::{ColorSpec, format_policy, highest_role, is_managed_color_role, mention_role};
 use crate::{Context, Data, Error, user_error};
 
 #[derive(Debug, Clone, Copy, poise::ChoiceParameter)]
@@ -307,6 +307,12 @@ async fn config_status(ctx: Context<'_>) -> Result<(), Error> {
 async fn color(
     ctx: Context<'_>,
     #[description = "적용할 HEX 색상. 예: #ff66aa"] hex: Option<String>,
+    #[description = "그라데이션 시작 HEX 색상. 예: #ff66aa"]
+    #[rename = "시작"]
+    gradient_start: Option<String>,
+    #[description = "그라데이션 끝 HEX 색상. 예: #66aaff"]
+    #[rename = "끝"]
+    gradient_end: Option<String>,
     #[description = "색상 제거 또는 마지막 색상 복구"]
     #[rename = "작업"]
     action: Option<ColorAction>,
@@ -315,48 +321,82 @@ async fn color(
     let storage = ctx.data().storage.clone();
     ctx.defer_ephemeral().await?;
 
-    let result = match (hex, action) {
-        (Some(hex), None) => apply_color_for_user(
-            ctx.serenity_context(),
-            &storage,
-            guild_id,
-            ctx.author().id,
-            &hex,
-            true,
-        )
-        .await
-        .map(|hex| format!("내 컬러를 `{hex}`로 변경했습니다.")),
-        (None, Some(ColorAction::Remove)) => remove_user_color(
-            ctx.serenity_context(),
-            &storage,
-            guild_id,
-            ctx.author().id,
-            false,
-        )
-        .await
-        .map(|removed| {
-            if removed {
-                "현재 컬러 역할을 제거했습니다.".to_string()
-            } else {
-                "제거할 컬러 역할이 없습니다.".to_string()
+    let result: Result<String, Error> = async {
+        if let Some(action) = action {
+            if hex.is_some() || gradient_start.is_some() || gradient_end.is_some() {
+                return Err(user_error(
+                    "색상 변경과 작업 옵션은 동시에 사용할 수 없습니다.",
+                ));
             }
-        }),
-        (None, Some(ColorAction::Restore)) => restore_user_color(
+
+            return match action {
+                ColorAction::Remove => {
+                    remove_user_color(
+                        ctx.serenity_context(),
+                        &storage,
+                        guild_id,
+                        ctx.author().id,
+                        false,
+                    )
+                    .await
+                    .map(|removed| {
+                        if removed {
+                            "현재 컬러 역할을 제거했습니다.".to_string()
+                        } else {
+                            "제거할 컬러 역할이 없습니다.".to_string()
+                        }
+                    })
+                }
+                ColorAction::Restore => {
+                    restore_user_color(
+                        ctx.serenity_context(),
+                        &storage,
+                        guild_id,
+                        ctx.author().id,
+                        true,
+                    )
+                    .await
+                    .map(|color| format!("마지막 컬러 `{color}`를 복구했습니다."))
+                }
+            };
+        }
+
+        if hex.is_some() && (gradient_start.is_some() || gradient_end.is_some()) {
+            return Err(user_error(
+                "`hex` 단색과 `시작`/`끝` 그라데이션 옵션은 동시에 사용할 수 없습니다.",
+            ));
+        }
+
+        let spec = if let Some(hex) = hex {
+            ColorSpec::solid(&hex)?
+        } else {
+            match (gradient_start, gradient_end) {
+                (Some(start), Some(end)) => ColorSpec::gradient(&start, &end)?,
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(user_error(
+                        "그라데이션은 `시작`과 `끝` HEX 색상을 모두 입력해야 합니다.",
+                    ));
+                }
+                (None, None) => {
+                    return Err(user_error(
+                        "색상을 바꾸려면 `hex` 또는 `시작`/`끝`을 입력하고, 제거/복구는 `작업`을 선택하세요.",
+                    ));
+                }
+            }
+        };
+
+        apply_color_for_user(
             ctx.serenity_context(),
             &storage,
             guild_id,
             ctx.author().id,
+            spec,
             true,
         )
         .await
-        .map(|hex| format!("마지막 컬러 `{hex}`를 복구했습니다.")),
-        (Some(_), Some(_)) => Err(user_error(
-            "색상 변경과 작업 옵션은 동시에 사용할 수 없습니다.",
-        )),
-        (None, None) => Err(user_error(
-            "색상을 바꾸려면 `hex`를 입력하고, 제거/복구는 `작업`을 선택하세요.",
-        )),
-    };
+        .map(|color| format!("내 컬러를 `{color}`로 변경했습니다."))
+    }
+    .await;
 
     match result {
         Ok(message) => reply_ephemeral(ctx, message).await,
