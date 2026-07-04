@@ -83,7 +83,11 @@ async fn main() -> Result<(), Error> {
         })
         .build();
 
-    let intents = serenity::GatewayIntents::GUILDS | serenity::GatewayIntents::GUILD_MEMBERS;
+    // GUILD_MEMBERS is a privileged intent. Without it enabled in the Discord
+    // Developer Portal the gateway rejects the connection, so it is omitted here.
+    // Consequence: GuildMemberUpdate events are not delivered, disabling the
+    // automatic role reconciliation feature (reconcile_member_roles).
+    let intents = serenity::GatewayIntents::GUILDS;
     let mut client = serenity::ClientBuilder::new(token, intents)
         .application_id(serenity::ApplicationId::new(application_id))
         .framework(framework)

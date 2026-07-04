@@ -616,6 +616,9 @@ pub(crate) async fn validate_anchor_role(
     Ok(())
 }
 
+// Currently unused: the GuildMemberUpdate event that drives this is disabled
+// because it requires the privileged GUILD_MEMBERS intent (see main.rs).
+#[allow(dead_code)]
 pub(crate) async fn reconcile_member_roles(
     ctx: &serenity::Context,
     storage: &Storage,

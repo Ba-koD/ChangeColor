@@ -4,7 +4,7 @@ use std::time::Duration;
 use poise::serenity_prelude as serenity;
 
 use crate::config::{CLEAR_COMMANDS, CLEAR_GLOBAL_COMMANDS, CLEAR_GUILD_COMMANDS};
-use crate::roles::{process_grace_expirations, reconcile_member_roles};
+use crate::roles::process_grace_expirations;
 use crate::storage::Storage;
 use crate::{Data, Error, user_error};
 
@@ -135,16 +135,9 @@ pub(crate) async fn event_handler(
                 );
             }
         }
-        serenity::FullEvent::GuildMemberUpdate { event, .. } => {
-            reconcile_member_roles(
-                ctx,
-                &data.storage,
-                event.guild_id,
-                event.user.id,
-                event.roles.clone(),
-            )
-            .await?;
-        }
+        // GuildMemberUpdate handling is disabled: it requires the privileged
+        // GUILD_MEMBERS gateway intent (see main.rs). Re-enable the intent and
+        // this arm together to restore automatic role reconciliation.
         _ => {}
     }
     Ok(())
