@@ -48,6 +48,26 @@ pub(crate) async fn current_bot_member(
     Ok(guild_id.member(&ctx.http, bot_id).await?)
 }
 
+/// Developer Portal에서 Server Members Intent가 켜져 있는지 확인한다.
+/// 꺼져 있는데 GUILD_MEMBERS를 요청하면 게이트웨이가 연결을 거부하므로 미리 확인한다.
+pub(crate) async fn members_intent_enabled(http: &serenity::Http) -> bool {
+    match http.get_current_application_info().await {
+        Ok(info) => info.flags.is_some_and(|flags| {
+            flags.intersects(
+                serenity::ApplicationFlags::GATEWAY_GUILD_MEMBERS
+                    | serenity::ApplicationFlags::GATEWAY_GUILD_MEMBERS_LIMITED,
+            )
+        }),
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                "failed to read application flags; assuming GUILD_MEMBERS intent is disabled"
+            );
+            false
+        }
+    }
+}
+
 pub(crate) async fn resolve_application_id(http: &serenity::Http) -> Result<u64, Error> {
     Ok(http.get_current_user().await?.id.get())
 }

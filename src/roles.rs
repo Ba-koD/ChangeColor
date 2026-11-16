@@ -19,7 +19,7 @@ pub(crate) async fn apply_color_for_user(
     spec: ColorSpec,
     check_eligibility: bool,
 ) -> Result<String, Error> {
-    let member = guild_id.member(ctx, user_id).await?;
+    let member = ctx.http.get_member(guild_id, user_id).await?;
     let config = storage.guild_config(guild_id).await;
 
     if check_eligibility && !is_eligible(&config, &member.roles) {
@@ -59,7 +59,7 @@ pub(crate) async fn remove_user_color(
     user_id: serenity::UserId,
     mark_lost: bool,
 ) -> Result<bool, Error> {
-    let member = guild_id.member(ctx, user_id).await?;
+    let member = ctx.http.get_member(guild_id, user_id).await?;
     let config = storage.guild_config(guild_id).await;
     let removed_role_ids = remove_configured_color_roles(ctx, &config, &member, None).await?;
     let removed = !removed_role_ids.is_empty();
@@ -616,9 +616,58 @@ pub(crate) async fn validate_anchor_role(
     Ok(())
 }
 
-// Currently unused: the GuildMemberUpdate event that drives this is disabled
-// because it requires the privileged GUILD_MEMBERS intent (see main.rs).
-#[allow(dead_code)]
+/// 컬러 역할을 가졌거나 자격 상실이 기록된 유저의 현재 역할을 REST로 다시 읽어
+/// `reconcile_member_roles`에 넘긴다. GUILD_MEMBERS 인텐트가 없을 때 쓰는 폴링 경로.
+pub(crate) async fn sync_member_eligibility(
+    ctx: &serenity::Context,
+    storage: &Storage,
+) -> Result<(), Error> {
+    for guild_id in storage.guild_ids().await {
+        let config = storage.guild_config(guild_id).await;
+        if config.allowed_role_ids.is_empty() {
+            continue;
+        }
+
+        let user_ids = config
+            .users
+            .iter()
+            .filter(|(_, state)| {
+                state.current_role_id.is_some() || state.lost_eligibility_at.is_some()
+            })
+            .map(|(user_id, _)| serenity::UserId::new(*user_id))
+            .collect::<Vec<_>>();
+
+        for user_id in user_ids {
+            // 캐시는 인텐트 없이 갱신되지 않으므로 반드시 HTTP로 조회한다.
+            let member = match ctx.http.get_member(guild_id, user_id).await {
+                Ok(member) => member,
+                Err(error) => {
+                    tracing::debug!(
+                        ?error,
+                        guild_id = guild_id.get(),
+                        user_id = user_id.get(),
+                        "member fetch failed during eligibility sync"
+                    );
+                    continue;
+                }
+            };
+
+            if let Err(error) =
+                reconcile_member_roles(ctx, storage, guild_id, user_id, member.roles).await
+            {
+                tracing::warn!(
+                    ?error,
+                    guild_id = guild_id.get(),
+                    user_id = user_id.get(),
+                    "failed to reconcile member color roles"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn reconcile_member_roles(
     ctx: &serenity::Context,
     storage: &Storage,
@@ -731,7 +780,7 @@ pub(crate) async fn process_grace_expirations(
             .collect::<Vec<_>>();
 
         for user_id in expired_users {
-            match guild_id.member(ctx, user_id).await {
+            match ctx.http.get_member(guild_id, user_id).await {
                 Ok(member) if is_eligible(&config, &member.roles) => {
                     storage
                         .update_guild(guild_id, |guild| {
