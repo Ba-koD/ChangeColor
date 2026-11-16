@@ -3,8 +3,10 @@ use std::time::Duration;
 
 use poise::serenity_prelude as serenity;
 
-use crate::config::{CLEAR_COMMANDS, CLEAR_GLOBAL_COMMANDS, CLEAR_GUILD_COMMANDS};
-use crate::roles::process_grace_expirations;
+use crate::config::{
+    CLEAR_COMMANDS, CLEAR_GLOBAL_COMMANDS, CLEAR_GUILD_COMMANDS, MEMBER_SYNC_INTERVAL_SECS,
+};
+use crate::roles::{process_grace_expirations, reconcile_member_roles, sync_member_eligibility};
 use crate::storage::Storage;
 use crate::{Data, Error, user_error};
 
@@ -135,9 +137,18 @@ pub(crate) async fn event_handler(
                 );
             }
         }
-        // GuildMemberUpdate handling is disabled: it requires the privileged
-        // GUILD_MEMBERS gateway intent (see main.rs). Re-enable the intent and
-        // this arm together to restore automatic role reconciliation.
+        // Only delivered when the GUILD_MEMBERS intent is enabled (see main.rs);
+        // otherwise spawn_member_sync_task covers the same reconciliation.
+        serenity::FullEvent::GuildMemberUpdate { event, .. } => {
+            reconcile_member_roles(
+                ctx,
+                &data.storage,
+                event.guild_id,
+                event.user.id,
+                event.roles.clone(),
+            )
+            .await?;
+        }
         _ => {}
     }
     Ok(())
@@ -153,6 +164,22 @@ async fn sync_guild_application_commands(
         .await?;
     println!("synced guild commands in guild {}", guild_id.get());
     Ok(())
+}
+
+/// GUILD_MEMBERS 인텐트가 없으면 GuildMemberUpdate를 못 받으므로,
+/// 컬러 역할을 가진 유저를 주기적으로 REST로 조회해 허용 역할 상실을 반영한다.
+pub(crate) fn spawn_member_sync_task(ctx: serenity::Context, storage: Arc<Storage>) {
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(MEMBER_SYNC_INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) = sync_member_eligibility(&ctx, &storage).await {
+                tracing::warn!(?error, "failed to sync member color eligibility");
+            }
+        }
+    });
 }
 
 pub(crate) fn spawn_grace_task(ctx: serenity::Context, storage: Arc<Storage>) {

@@ -17,9 +17,11 @@ mod tests;
 
 pub(crate) use error::{Error, user_error};
 
-use crate::config::DEFAULT_DATA_PATH;
-use crate::discord::resolve_application_id;
-use crate::runtime::{clear_commands_from_arg, event_handler, spawn_grace_task};
+use crate::config::{DEFAULT_DATA_PATH, MEMBER_SYNC_INTERVAL_SECS};
+use crate::discord::{members_intent_enabled, resolve_application_id};
+use crate::runtime::{
+    clear_commands_from_arg, event_handler, spawn_grace_task, spawn_member_sync_task,
+};
 use crate::storage::Storage;
 
 pub(crate) type Context<'a> = poise::Context<'a, Data, Error>;
@@ -56,6 +58,7 @@ async fn main() -> Result<(), Error> {
 
     let data_path = std::env::var("DATA_PATH").unwrap_or_else(|_| DEFAULT_DATA_PATH.to_string());
     let storage = Arc::new(Storage::load(PathBuf::from(data_path))?);
+    let members_intent = members_intent_enabled(&http).await;
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -76,6 +79,15 @@ async fn main() -> Result<(), Error> {
             let storage = storage.clone();
             Box::pin(async move {
                 spawn_grace_task(ctx.clone(), storage.clone());
+                if members_intent {
+                    tracing::info!("GUILD_MEMBERS intent enabled: reconciling on member updates");
+                } else {
+                    tracing::info!(
+                        interval_secs = MEMBER_SYNC_INTERVAL_SECS,
+                        "GUILD_MEMBERS intent disabled: polling color users periodically"
+                    );
+                    spawn_member_sync_task(ctx.clone(), storage.clone());
+                }
                 println!("bot is ready: {}", ready.user.name);
                 tracing::info!(user = %ready.user.name, "bot is ready");
                 Ok(Data { storage })
@@ -83,11 +95,13 @@ async fn main() -> Result<(), Error> {
         })
         .build();
 
-    // GUILD_MEMBERS is a privileged intent. Without it enabled in the Discord
-    // Developer Portal the gateway rejects the connection, so it is omitted here.
-    // Consequence: GuildMemberUpdate events are not delivered, disabling the
-    // automatic role reconciliation feature (reconcile_member_roles).
-    let intents = serenity::GatewayIntents::GUILDS;
+    // GUILD_MEMBERS is a privileged intent: requesting it while it is disabled in the
+    // Developer Portal makes the gateway reject the connection. Only request it when
+    // enabled; otherwise spawn_member_sync_task polls members over REST instead.
+    let mut intents = serenity::GatewayIntents::GUILDS;
+    if members_intent {
+        intents |= serenity::GatewayIntents::GUILD_MEMBERS;
+    }
     let mut client = serenity::ClientBuilder::new(token, intents)
         .application_id(serenity::ApplicationId::new(application_id))
         .framework(framework)
