@@ -62,7 +62,10 @@ cp .env.example .env
 ```env
 DISCORD_TOKEN=...
 DATA_PATH=./data/state.json
+DATA_ENCRYPTION_KEY=...  # openssl rand -hex 32
 ```
+
+`DATA_ENCRYPTION_KEY`를 넣으면 상태 파일을 AES-256-GCM으로 암호화해 저장합니다. 기존 평문 파일은 처음 시작할 때 자동으로 암호화됩니다. 키를 잃어버리면 파일을 읽을 수 없으니 따로 보관하세요.
 
 봇이 서버에 들어가면 해당 서버의 guild slash command가 자동 등록됩니다. 이미 들어가 있는 서버도 봇 시작 시 다시 등록됩니다. `GUILD_ID`나 `APPLICATION_ID`는 필요 없습니다.
 

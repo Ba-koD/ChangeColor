@@ -1,6 +1,6 @@
 # ChangeColor Privacy Policy
 
-_Last updated: 2026-11-16_
+_Last updated: 2026-11-24_
 
 This policy explains what data the ChangeColor Discord bot ("the bot") collects, why it is collected, and how it is handled. [한국어는 아래에 있습니다.](#개인정보-처리방침-한국어)
 
@@ -28,7 +28,7 @@ To decide whether a member may use colors, the bot reads that member's current r
 
 ## How data is stored
 
-- All data is kept in a single JSON file on a server run by the bot operator.
+- All data is kept in a single file on a server run by the bot operator. The file is encrypted at rest with AES-256-GCM, and the key is kept separately from the file.
 - It is not sold, shared with third parties, or used for advertising, analytics, or training.
 - Application logs may include server IDs and user IDs while an error is being handled. Logs are used only for debugging.
 
@@ -50,7 +50,7 @@ When this policy changes, the new version will be published at this address and 
 
 ## 개인정보 처리방침 (한국어)
 
-_최종 수정일: 2026-11-16_
+_최종 수정일: 2026-11-24_
 
 ### 저장하는 정보
 
@@ -76,7 +76,7 @@ _최종 수정일: 2026-11-16_
 
 ### 보관 방법
 
-- 모든 정보는 운영자가 관리하는 서버의 JSON 파일 하나에 저장됩니다.
+- 모든 정보는 운영자가 관리하는 서버의 파일 하나에 저장됩니다. 이 파일은 AES-256-GCM으로 암호화해 저장하며, 키는 파일과 따로 보관합니다.
 - 판매하거나 제3자에게 제공하지 않으며, 광고·분석·학습에 쓰지 않습니다.
 - 오류를 처리하는 동안 실행 로그에 서버 ID와 사용자 ID가 남을 수 있습니다. 이 로그는 디버깅에만 씁니다.
 

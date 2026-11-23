@@ -120,3 +120,64 @@ fn store_round_trip_keeps_policy() {
     );
     assert!(decoded_guild.allowed_role_ids.contains(&2));
 }
+
+mod state_encryption {
+    use std::path::PathBuf;
+
+    use poise::serenity_prelude as serenity;
+
+    use crate::crypto::{StateCipher, is_encrypted};
+    use crate::storage::{Storage, Store};
+
+    const KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const OTHER_KEY: &str = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
+
+    fn temp_state_path(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("change-color-test-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("state.json")
+    }
+
+    #[test]
+    fn round_trips_and_rejects_wrong_key() {
+        let cipher = StateCipher::from_hex(KEY).unwrap();
+        let encrypted = cipher.encrypt(b"{\"guilds\":{}}").unwrap();
+        assert!(is_encrypted(&encrypted));
+        assert_eq!(cipher.decrypt(&encrypted).unwrap(), b"{\"guilds\":{}}");
+        assert!(
+            StateCipher::from_hex(OTHER_KEY)
+                .unwrap()
+                .decrypt(&encrypted)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_keys() {
+        assert!(StateCipher::from_hex("abcd").is_err());
+        assert!(StateCipher::from_hex(&"zz".repeat(32)).is_err());
+        assert!(StateCipher::from_hex(&"가".repeat(21)).is_err());
+    }
+
+    #[tokio::test]
+    async fn migrates_plaintext_state_and_keeps_it_encrypted() {
+        let path = temp_state_path("migrate");
+        std::fs::write(&path, serde_json::to_vec(&Store::default()).unwrap()).unwrap();
+
+        let storage =
+            Storage::load(path.clone(), Some(StateCipher::from_hex(KEY).unwrap())).unwrap();
+        assert!(is_encrypted(&std::fs::read(&path).unwrap()));
+
+        let guild_id = serenity::GuildId::new(42);
+        storage.update_guild(guild_id, |_| ()).await.unwrap();
+        assert!(is_encrypted(&std::fs::read(&path).unwrap()));
+
+        let reloaded =
+            Storage::load(path.clone(), Some(StateCipher::from_hex(KEY).unwrap())).unwrap();
+        assert_eq!(reloaded.guild_ids().await, vec![guild_id]);
+        assert!(Storage::load(path.clone(), None).is_err());
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+}

@@ -5,7 +5,8 @@ use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::Error;
+use crate::crypto::{StateCipher, is_encrypted};
+use crate::{Error, user_error};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct Store {
@@ -84,20 +85,34 @@ pub(crate) struct UserColorState {
 
 pub(crate) struct Storage {
     path: PathBuf,
+    cipher: Option<StateCipher>,
     inner: RwLock<Store>,
 }
 
 impl Storage {
-    pub(crate) fn load(path: PathBuf) -> Result<Self, Error> {
-        let store = if path.exists() {
+    /// Loads the state file. With a cipher, an encrypted file is decrypted and a
+    /// plaintext file from an older version is re-written encrypted right away.
+    pub(crate) fn load(path: PathBuf, cipher: Option<StateCipher>) -> Result<Self, Error> {
+        let (store, needs_encryption) = if path.exists() {
             let bytes = std::fs::read(&path)?;
-            serde_json::from_slice(&bytes)?
+            if is_encrypted(&bytes) {
+                let cipher = cipher.as_ref().ok_or_else(|| {
+                    user_error("state file is encrypted but DATA_ENCRYPTION_KEY is not set")
+                })?;
+                (serde_json::from_slice(&cipher.decrypt(&bytes)?)?, false)
+            } else {
+                (serde_json::from_slice(&bytes)?, cipher.is_some())
+            }
         } else {
-            Store::default()
+            (Store::default(), false)
         };
 
+        if needs_encryption {
+            write_state(&path, cipher.as_ref(), &store)?;
+        }
         Ok(Self {
             path,
+            cipher,
             inner: RwLock::new(store),
         })
     }
@@ -128,16 +143,23 @@ impl Storage {
     }
 
     fn persist(&self, store: &Store) -> Result<(), Error> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let tmp_path = tmp_path_for(&self.path);
-        let bytes = serde_json::to_vec_pretty(store)?;
-        std::fs::write(&tmp_path, bytes)?;
-        std::fs::rename(tmp_path, &self.path)?;
-        Ok(())
+        write_state(&self.path, self.cipher.as_ref(), store)
     }
+}
+
+fn write_state(path: &Path, cipher: Option<&StateCipher>, store: &Store) -> Result<(), Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = tmp_path_for(path);
+    let mut bytes = serde_json::to_vec_pretty(store)?;
+    if let Some(cipher) = cipher {
+        bytes = cipher.encrypt(&bytes)?;
+    }
+    std::fs::write(&tmp_path, bytes)?;
+    std::fs::rename(tmp_path, path)?;
+    Ok(())
 }
 
 fn tmp_path_for(path: &Path) -> PathBuf {
