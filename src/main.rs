@@ -5,6 +5,7 @@ use poise::serenity_prelude as serenity;
 
 mod commands;
 mod config;
+mod crypto;
 mod discord;
 mod error;
 mod roles;
@@ -18,6 +19,7 @@ mod tests;
 pub(crate) use error::{Error, user_error};
 
 use crate::config::{DEFAULT_DATA_PATH, MEMBER_SYNC_INTERVAL_SECS};
+use crate::crypto::StateCipher;
 use crate::discord::{members_intent_enabled, resolve_application_id};
 use crate::runtime::{
     clear_commands_from_arg, event_handler, spawn_grace_task, spawn_member_sync_task,
@@ -57,7 +59,14 @@ async fn main() -> Result<(), Error> {
     }
 
     let data_path = std::env::var("DATA_PATH").unwrap_or_else(|_| DEFAULT_DATA_PATH.to_string());
-    let storage = Arc::new(Storage::load(PathBuf::from(data_path))?);
+    let cipher = match std::env::var("DATA_ENCRYPTION_KEY") {
+        Ok(key) if !key.trim().is_empty() => Some(StateCipher::from_hex(&key)?),
+        _ => {
+            tracing::warn!("DATA_ENCRYPTION_KEY is not set; the state file is stored unencrypted");
+            None
+        }
+    };
+    let storage = Arc::new(Storage::load(PathBuf::from(data_path), cipher)?);
     let members_intent = members_intent_enabled(&http).await;
 
     let framework = poise::Framework::builder()
